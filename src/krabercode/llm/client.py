@@ -1,10 +1,13 @@
 """
 LLM client implementation using litellm.
 
-Provides unified interface for multiple LLM providers.
+Provides unified interface for multiple LLM providers with support for:
+- OpenAI, Anthropic, Alibaba/Qwen, Google Gemini
+- Custom Base URL for OpenAI/Anthropic compatible APIs
+- Streaming and non-streaming responses
+- Tool/function calling
 """
 
-import asyncio
 import json
 from typing import Any, AsyncIterator, Optional
 
@@ -26,6 +29,7 @@ class LiteLLMClient(LLMClient):
         "alibaba": "dashscope/",  # Qwen models via Dashscope
         "google": "gemini/",
         "azure": "azure/",
+        "custom": "openai/",  # Custom providers use OpenAI protocol by default
     }
 
     def __init__(
@@ -40,6 +44,8 @@ class LiteLLMClient(LLMClient):
 
     def _configure_litellm(self) -> None:
         """Configure litellm with API keys and settings."""
+        provider = self.settings.model.provider
+
         # Set API keys from settings or storage
         openai_key = self.storage.get_api_key("openai") or self.settings.openai.api_key
         if openai_key:
@@ -57,6 +63,11 @@ class LiteLLMClient(LLMClient):
         if google_key:
             litellm.google_key = google_key
 
+        # Custom provider API key
+        custom_key = self.storage.get_api_key("custom") or self.settings.custom.api_key
+        if custom_key and provider == "custom":
+            litellm.openai_key = custom_key  # Use OpenAI protocol
+
         # Configure defaults
         litellm.num_retries = 3
         litellm.retry_on_status_codes = [429, 500, 502, 503]
@@ -64,8 +75,10 @@ class LiteLLMClient(LLMClient):
         # Enable caching (optional)
         litellm.cache = None  # Disable cache by default
 
-        # Set timeout
-        litellm.request_timeout = self.settings.tools.shell_timeout
+        # Set timeout by provider/model settings (not tool shell timeout)
+        provider_settings = getattr(self.settings, provider, None)
+        provider_timeout = getattr(provider_settings, "timeout", None)
+        litellm.request_timeout = provider_timeout or 60
 
     def _get_model_string(self) -> str:
         """Get the full model string for litellm."""
@@ -80,6 +93,17 @@ class LiteLLMClient(LLMClient):
         # Add prefix based on provider
         prefix = self.MODEL_PREFIXES.get(provider, "")
         return f"{prefix}{model_name}"
+
+    def _get_api_base_url(self) -> Optional[str]:
+        """Get custom base URL if configured."""
+        # Check storage first (user can set via /baseurl command)
+        base_url = self.storage.get_base_url(self.settings.model.provider)
+
+        # Then check settings
+        if not base_url:
+            base_url = self.settings.get_provider_base_url(self.settings.model.provider)
+
+        return base_url
 
     async def complete(
         self,
@@ -98,6 +122,11 @@ class LiteLLMClient(LLMClient):
             "temperature": kwargs.get("temperature", self.settings.model.temperature),
             "max_tokens": kwargs.get("max_tokens", self.settings.model.max_tokens),
         }
+
+        # Add custom base URL if configured
+        base_url = self._get_api_base_url()
+        if base_url:
+            params["api_base"] = base_url
 
         if tools:
             params["tools"] = tools
@@ -163,6 +192,11 @@ class LiteLLMClient(LLMClient):
             "stream": True,
         }
 
+        # Add custom base URL if configured
+        base_url = self._get_api_base_url()
+        if base_url:
+            params["api_base"] = base_url
+
         if tools:
             params["tools"] = tools
             params["tool_choice"] = "auto"
@@ -170,9 +204,8 @@ class LiteLLMClient(LLMClient):
         # Stream the response
         response = await litellm.acompletion(**params)
 
-        # Track current tool call being built
-        current_tool_call: Optional[dict[str, Any]] = None
-        tool_arguments_buffer = ""
+        # Track tool call fragments by index
+        tool_call_fragments: dict[int, dict[str, Any]] = {}
 
         input_tokens = 0
         output_tokens = 0
@@ -195,36 +228,43 @@ class LiteLLMClient(LLMClient):
             # Handle tool calls (streaming)
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
+                    idx = getattr(tc_delta, "index", 0)
+
+                    fragment = tool_call_fragments.setdefault(
+                        idx,
+                        {"id": "", "name": "", "arguments": ""},
+                    )
+
                     if tc_delta.id:
-                        # New tool call
-                        current_tool_call = {
-                            "id": tc_delta.id,
-                            "name": tc_delta.function.name if tc_delta.function else None,
-                        }
-                        tool_arguments_buffer = ""
+                        fragment["id"] = tc_delta.id
 
-                    if tc_delta.function and tc_delta.function.arguments:
-                        # Accumulate arguments
-                        tool_arguments_buffer += tc_delta.function.arguments
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            fragment["name"] = tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            fragment["arguments"] += tc_delta.function.arguments
 
-            # Check if tool call is complete
+            # Emit all completed tool calls when tool-calls turn ends
             if chunk.choices[0].finish_reason == "tool_calls":
-                if current_tool_call and tool_arguments_buffer:
+                for idx in sorted(tool_call_fragments.keys()):
+                    fragment = tool_call_fragments[idx]
                     try:
-                        args = json.loads(tool_arguments_buffer)
+                        args = json.loads(fragment["arguments"] or "{}")
                     except json.JSONDecodeError:
                         args = {}
 
                     yield LLMStreamChunk(
                         tool_call=ToolCall(
-                            id=current_tool_call["id"],
-                            name=current_tool_call["name"] or "",
+                            id=fragment["id"],
+                            name=fragment["name"],
                             arguments=args,
                         ),
                         finish_reason="tool_calls",
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
                     )
+
+                tool_call_fragments.clear()
 
             # Check for final chunk
             if chunk.choices[0].finish_reason:

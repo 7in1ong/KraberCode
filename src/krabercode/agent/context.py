@@ -68,9 +68,12 @@ class ContextManager:
         """Set the system prompt."""
         self.system_prompt = prompt
     
-    def add_message(self, role: str, content: str) -> None:
+    def add_message(self, role: str, content: str, **metadata) -> None:
         """Add a message to conversation history."""
-        self.conversation_history.append({"role": role, "content": content})
+        message = {"role": role, "content": content}
+        if metadata:
+            message.update(metadata)
+        self.conversation_history.append(message)
     
     def get_messages(self) -> list[dict]:
         """Get all messages for the LLM."""

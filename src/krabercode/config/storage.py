@@ -2,7 +2,7 @@
 Configuration storage and persistence for KraberCode.
 
 Handles reading/writing config files, managing API keys securely,
-and project-level configuration.
+base URLs for custom endpoints, and project-level configuration.
 """
 
 import json
@@ -45,8 +45,13 @@ class ConfigStorage:
 
     @property
     def secrets_file(self) -> Path:
-        """Path to the secrets file (API keys)."""
+        """Path to the secrets file (API keys and base URLs)."""
         return self.config_dir / "secrets.yaml"
+
+    @property
+    def plan_file(self) -> Path:
+        """Path to the coding plan file."""
+        return self.config_dir / "plan.yaml"
 
     def load_config(self) -> dict[str, Any]:
         """Load configuration from file."""
@@ -93,6 +98,8 @@ class ConfigStorage:
         with open(self.history_file, "w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
 
+    # === API Key Management ===
+
     def get_api_key(self, provider: str) -> Optional[str]:
         """Get API key for a provider from secrets file."""
         # First check environment variables
@@ -101,6 +108,7 @@ class ConfigStorage:
             "anthropic": "ANTHROPIC_API_KEY",
             "alibaba": "DASHSCOPE_API_KEY",
             "google": "GOOGLE_API_KEY",
+            "custom": "KRABER_CUSTOM_API_KEY",
         }
 
         env_var = env_key_map.get(provider)
@@ -125,7 +133,10 @@ class ConfigStorage:
             with open(self.secrets_file, encoding="utf-8") as f:
                 secrets = yaml.safe_load(f) or {"providers": {}}
 
-        secrets.setdefault("providers", {})[provider] = {"api_key": api_key}
+        secrets.setdefault("providers", {})
+        if provider not in secrets["providers"]:
+            secrets["providers"][provider] = {}
+        secrets["providers"][provider]["api_key"] = api_key
 
         with open(self.secrets_file, "w", encoding="utf-8") as f:
             yaml.dump(secrets, f, default_flow_style=False)
@@ -133,6 +144,214 @@ class ConfigStorage:
         # Set restrictive permissions on secrets file (Unix only)
         if os.name != "nt":
             os.chmod(self.secrets_file, 0o600)
+
+    def delete_api_key(self, provider: str) -> bool:
+        """Delete API key for a provider from secrets file."""
+        if not self.secrets_file.exists():
+            return False
+
+        with open(self.secrets_file, encoding="utf-8") as f:
+            secrets = yaml.safe_load(f) or {}
+
+        if provider in secrets.get("providers", {}):
+            secrets["providers"][provider]["api_key"] = ""
+            with open(self.secrets_file, "w", encoding="utf-8") as f:
+                yaml.dump(secrets, f, default_flow_style=False)
+            return True
+
+        return False
+
+    def list_api_keys_status(self) -> dict[str, dict[str, Any]]:
+        """Get status of all API keys (configured or from env)."""
+        providers = ["openai", "anthropic", "alibaba", "google", "custom"]
+        env_key_map = {
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "alibaba": "DASHSCOPE_API_KEY",
+            "google": "GOOGLE_API_KEY",
+            "custom": "KRABER_CUSTOM_API_KEY",
+        }
+
+        status = {}
+        for provider in providers:
+            env_var = env_key_map[provider]
+            env_key = os.environ.get(env_var)
+            file_key = None
+
+            if self.secrets_file.exists():
+                with open(self.secrets_file, encoding="utf-8") as f:
+                    secrets = yaml.safe_load(f) or {}
+                    file_key = secrets.get("providers", {}).get(provider, {}).get("api_key")
+
+            # Check if key is set (non-empty)
+            has_key = bool(env_key or (file_key and file_key.strip()))
+            source = "env" if env_key else ("file" if file_key and file_key.strip() else "none")
+
+            status[provider] = {
+                "has_key": has_key,
+                "source": source,
+                "env_var": env_var,
+            }
+
+        return status
+
+    # === Base URL Management ===
+
+    def get_base_url(self, provider: str) -> Optional[str]:
+        """Get custom base URL for a provider."""
+        # First check environment variable
+        env_url_map = {
+            "openai": "OPENAI_BASE_URL",
+            "anthropic": "ANTHROPIC_BASE_URL",
+            "custom": "KRABER_CUSTOM_BASE_URL",
+        }
+        env_var = env_url_map.get(provider)
+        if env_var:
+            url = os.environ.get(env_var)
+            if url:
+                return url
+
+        # Then check secrets file
+        if not self.secrets_file.exists():
+            return None
+
+        with open(self.secrets_file, encoding="utf-8") as f:
+            secrets = yaml.safe_load(f) or {}
+            return secrets.get("providers", {}).get(provider, {}).get("base_url")
+
+    def set_base_url(self, provider: str, base_url: str) -> None:
+        """Set custom base URL for a provider."""
+        secrets: dict[str, Any] = {"providers": {}}
+
+        if self.secrets_file.exists():
+            with open(self.secrets_file, encoding="utf-8") as f:
+                secrets = yaml.safe_load(f) or {"providers": {}}
+
+        secrets.setdefault("providers", {})
+        if provider not in secrets["providers"]:
+            secrets["providers"][provider] = {}
+        secrets["providers"][provider]["base_url"] = base_url
+
+        with open(self.secrets_file, "w", encoding="utf-8") as f:
+            yaml.dump(secrets, f, default_flow_style=False)
+
+    def delete_base_url(self, provider: str) -> bool:
+        """Delete custom base URL for a provider."""
+        if not self.secrets_file.exists():
+            return False
+
+        with open(self.secrets_file, encoding="utf-8") as f:
+            secrets = yaml.safe_load(f) or {}
+
+        if provider in secrets.get("providers", {}):
+            secrets["providers"][provider].pop("base_url", None)
+            with open(self.secrets_file, "w", encoding="utf-8") as f:
+                yaml.dump(secrets, f, default_flow_style=False)
+            return True
+
+        return False
+
+    # === Coding Plan Management ===
+
+    def load_plan(self) -> dict[str, Any]:
+        """Load coding plan configuration."""
+        if not self.plan_file.exists():
+            return {}
+
+        with open(self.plan_file, encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+
+    def save_plan(self, plan: dict[str, Any]) -> None:
+        """Save coding plan configuration."""
+        with open(self.plan_file, "w", encoding="utf-8") as f:
+            yaml.dump(plan, f, default_flow_style=False, allow_unicode=True)
+
+    def get_active_plan(self) -> Optional[str]:
+        """Get the name of the active coding plan."""
+        plan = self.load_plan()
+        return plan.get("active_plan")
+
+    def set_active_plan(self, plan_name: str) -> None:
+        """Set the active coding plan."""
+        plan = self.load_plan()
+        plan["active_plan"] = plan_name
+        self.save_plan(plan)
+
+    def list_plans(self) -> dict[str, dict[str, Any]]:
+        """List all available coding plans."""
+        plan = self.load_plan()
+        return plan.get("plans", {})
+
+    def get_plan_config(self, plan_name: str) -> Optional[dict[str, Any]]:
+        """Get configuration for a specific plan."""
+        plans = self.list_plans()
+        return plans.get(plan_name)
+
+    def create_plan(
+        self,
+        name: str,
+        description: str = "",
+        mode: str = "interactive",
+        max_iterations: int = 10,
+        auto_confirm: bool = False,
+    ) -> None:
+        """Create a new coding plan."""
+        plan = self.load_plan()
+        plan.setdefault("plans", {})
+        plan["plans"][name] = {
+            "description": description,
+            "mode": mode,
+            "max_iterations": max_iterations,
+            "auto_confirm": auto_confirm,
+        }
+        self.save_plan(plan)
+
+    def delete_plan(self, name: str) -> bool:
+        """Delete a coding plan."""
+        plan = self.load_plan()
+        if name in plan.get("plans", {}):
+            del plan["plans"][name]
+            if plan.get("active_plan") == name:
+                plan["active_plan"] = None
+            self.save_plan(plan)
+            return True
+        return False
+
+    def init_default_plan(self) -> None:
+        """Initialize default coding plans."""
+        if not self.plan_file.exists():
+            default_plan = {
+                "active_plan": "interactive",
+                "plans": {
+                    "interactive": {
+                        "description": "Interactive mode - ask before each action",
+                        "mode": "interactive",
+                        "max_iterations": 10,
+                        "auto_confirm": False,
+                    },
+                    "auto": {
+                        "description": "Auto mode - execute with minimal prompts",
+                        "mode": "auto",
+                        "max_iterations": 20,
+                        "auto_confirm": True,
+                    },
+                    "plan-first": {
+                        "description": "Plan first - show plan before executing",
+                        "mode": "plan-first",
+                        "max_iterations": 15,
+                        "auto_confirm": False,
+                    },
+                    "direct": {
+                        "description": "Direct mode - single response without tools",
+                        "mode": "direct",
+                        "max_iterations": 1,
+                        "auto_confirm": True,
+                    },
+                },
+            }
+            self.save_plan(default_plan)
+
+    # === Project Config ===
 
     def get_project_config_path(self, project_root: Path) -> Path:
         """Get project-level configuration path."""
@@ -155,6 +374,8 @@ class ConfigStorage:
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
 
+    # === Default Config Initialization ===
+
     def init_default_config(self) -> None:
         """Initialize default configuration files with templates."""
         # Main config file
@@ -166,6 +387,11 @@ class ConfigStorage:
                     "temperature": 0.7,
                     "max_tokens": 4096,
                     "stream": True,
+                    "base_url": None,
+                },
+                "plan": {
+                    "mode": "interactive",
+                    "max_iterations": 10,
                 },
                 "output": {
                     "format": "markdown",
@@ -194,71 +420,36 @@ class ConfigStorage:
                 "providers": {
                     "openai": {
                         "api_key": "",
-                        "_comment": "Set your OpenAI API key here or use OPENAI_API_KEY env var",
+                        "base_url": "",
+                        "_comment": "OpenAI API key and optional custom base URL",
                     },
                     "anthropic": {
                         "api_key": "",
-                        "_comment": "Set your Anthropic API key here or use ANTHROPIC_API_KEY env var",
+                        "base_url": "",
+                        "_comment": "Anthropic API key and optional custom base URL",
                     },
                     "alibaba": {
                         "api_key": "",
-                        "_comment": "Set your Dashscope API key (for Qwen models) or use DASHSCOPE_API_KEY env var",
+                        "_comment": "Dashscope API key (for Qwen models)",
                     },
                     "google": {
                         "api_key": "",
-                        "_comment": "Set your Google API key (for Gemini) or use GOOGLE_API_KEY env var",
+                        "_comment": "Google API key (for Gemini)",
+                    },
+                    "custom": {
+                        "api_key": "",
+                        "base_url": "",
+                        "_comment": "Custom provider for OpenAI/Anthropic compatible APIs",
                     },
                 },
-                "_help": "API keys can be set here or via environment variables. Environment variables take priority.",
+                "_help": "API keys and base URLs can be set here or via environment variables.\n"
+                         "Environment variables take priority:\n"
+                         "  OPENAI_API_KEY, OPENAI_BASE_URL\n"
+                         "  ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL\n"
+                         "  KRABER_CUSTOM_API_KEY, KRABER_CUSTOM_BASE_URL",
             }
             with open(self.secrets_file, "w", encoding="utf-8") as f:
                 yaml.dump(default_secrets, f, default_flow_style=False, allow_unicode=True)
 
-    def list_api_keys_status(self) -> dict[str, dict[str, Any]]:
-        """Get status of all API keys (configured or from env)."""
-        providers = ["openai", "anthropic", "alibaba", "google"]
-        env_key_map = {
-            "openai": "OPENAI_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "alibaba": "DASHSCOPE_API_KEY",
-            "google": "GOOGLE_API_KEY",
-        }
-        
-        status = {}
-        for provider in providers:
-            env_var = env_key_map[provider]
-            env_key = os.environ.get(env_var)
-            file_key = None
-            
-            if self.secrets_file.exists():
-                with open(self.secrets_file, encoding="utf-8") as f:
-                    secrets = yaml.safe_load(f) or {}
-                    file_key = secrets.get("providers", {}).get(provider, {}).get("api_key")
-            
-            # Check if key is set (non-empty)
-            has_key = bool(env_key or (file_key and file_key.strip()))
-            source = "env" if env_key else ("file" if file_key and file_key.strip() else "none")
-            
-            status[provider] = {
-                "has_key": has_key,
-                "source": source,
-                "env_var": env_var,
-            }
-        
-        return status
-    
-    def delete_api_key(self, provider: str) -> bool:
-        """Delete API key for a provider from secrets file."""
-        if not self.secrets_file.exists():
-            return False
-        
-        with open(self.secrets_file, encoding="utf-8") as f:
-            secrets = yaml.safe_load(f) or {}
-        
-        if provider in secrets.get("providers", {}):
-            secrets["providers"][provider]["api_key"] = ""
-            with open(self.secrets_file, "w", encoding="utf-8") as f:
-                yaml.dump(secrets, f, default_flow_style=False)
-            return True
-        
-        return False
+        # Coding plan file
+        self.init_default_plan()

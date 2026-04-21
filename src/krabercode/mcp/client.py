@@ -204,6 +204,7 @@ _mcp_client: Optional[MCPClient] = None
 
 async def get_mcp_client() -> MCPClient:
     """Get the global MCP client."""
+    global _mcp_client
     if _mcp_client is None:
         _mcp_client = MCPClient()
         await _mcp_client.initialize()
@@ -212,6 +213,7 @@ async def get_mcp_client() -> MCPClient:
 
 async def shutdown_mcp_client() -> None:
     """Shutdown the global MCP client."""
+    global _mcp_client
     if _mcp_client:
         await _mcp_client.shutdown()
         _mcp_client = None
