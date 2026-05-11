@@ -4,6 +4,7 @@ Tests for KraberCode agent module.
 
 import pytest
 import os
+import numpy as np
 
 from krabercode.agent.context import ContextManager
 from krabercode.agent.executor import AgentExecutor
