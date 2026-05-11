@@ -3,6 +3,7 @@ Tests for KraberCode agent module.
 """
 
 import pytest
+import os
 
 from krabercode.agent.context import ContextManager
 from krabercode.agent.executor import AgentExecutor
